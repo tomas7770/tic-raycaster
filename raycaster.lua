@@ -26,7 +26,7 @@ SKY_TEX=267
 DRAW_FLOOR=true
 DRAW_CEIL=true
 DRAW_SKY=false
-I_LEAVE=2
+I_LEAVE=1
 ENTITY_DEF={
 	[0]={
 		--Player
@@ -60,6 +60,7 @@ function Init()
 	cam.diry=plr.dirx
 	cam.length=math.tan(math.rad(FOV/2))
 	zbuf={}
+	lowest_wallh=0
 	for x=0,SW-1 do
 		zbuf[x]=math.huge
 	end
@@ -98,6 +99,7 @@ function TIC()
 			end
 		end
 	end
+	DoWallCasts()
 	DrawFloorCeil()
 	if DRAW_SKY then
 		DrawSky()
@@ -217,47 +219,52 @@ function DrawFloorCeil()
 	plr.diry+cam.diry*cam.length
 	for y=DRAW_CEIL and 0 or SH/2,
 	DRAW_FLOOR and SH-1 or SH/2 do
-		local y_diff=math.abs(y-SH/2)
-		if y_diff~=0 then
-			local isFloor=y>SH/2
-			local planeDistance=(SH/2)/y_diff
-			--Where the rays intersect the floor/ceiling
-			local planeX0,planeY0,planeX1,planeY1=
-			plr.x+dirx0*planeDistance,
-			plr.y+diry0*planeDistance,
-			plr.x+dirx1*planeDistance,
-			plr.y+diry1*planeDistance
-			local stepX,stepY=
-			(planeX1-planeX0)/(SW-1),
-			(planeY1-planeY0)/(SW-1)
-			local planeX,planeY=
-			planeX0+stepX*(t%I_LEAVE),
-			planeY0+stepY*(t%I_LEAVE)
-			local tex=isFloor
-			and FLOOR_TEX
-			or CEIL_TEX
-			for x=t%I_LEAVE,SW-1,I_LEAVE do
-				planeX,planeY=
-				planeX+stepX*I_LEAVE,
-				planeY+stepY*I_LEAVE
-				--Get texture coords
-				local planeXi,planeYi=
-				planeX%1,planeY%1
-				local texX=(planeXi*TEX_SIZE)//1
-				local texY=(planeYi*TEX_SIZE)//1
-				--Fix texture mirroring
-				if not isFloor then
-					texX=TEX_SIZE-texX-1
+		if y<(SH-lowest_wallh)/2
+		or y>(SH+lowest_wallh)/2 then
+			local y_diff=math.abs(y-SH/2)
+			if y_diff~=0 then
+				local isFloor=y>SH/2
+				local planeDistance=(SH/2)/y_diff
+				--Where the rays intersect the floor/ceiling
+				local planeX0,planeY0,planeX1,planeY1=
+				plr.x+dirx0*planeDistance,
+				plr.y+diry0*planeDistance,
+				plr.x+dirx1*planeDistance,
+				plr.y+diry1*planeDistance
+				local stepX,stepY=
+				(planeX1-planeX0)/(SW-1),
+				(planeY1-planeY0)/(SW-1)
+				local planeX,planeY=
+				planeX0+stepX*(t%I_LEAVE),
+				planeY0+stepY*(t%I_LEAVE)
+				local tex=isFloor
+				and FLOOR_TEX
+				or CEIL_TEX
+				for x=t%I_LEAVE,SW-1,I_LEAVE do
+					planeX,planeY=
+					planeX+stepX*I_LEAVE,
+					planeY+stepY*I_LEAVE
+					if planeDistance<zbuf[x][7] then	
+						--Get texture coords
+						local planeXi,planeYi=
+						planeX%1,planeY%1
+						local texX=(planeXi*TEX_SIZE)//1
+						local texY=(planeYi*TEX_SIZE)//1
+						--Fix texture mirroring
+						if not isFloor then
+							texX=TEX_SIZE-texX-1
+						end
+						--Draw
+						local spr_offx=texX//8
+						local spr_offy=texY//8
+						local address_x=0x8000+tex*64
+						+texX%8+spr_offx*64
+						pix(x,y,peek4(
+						address_x+(texY%8)*8
+						+spr_offy*1024
+						))
+					end
 				end
-				--Draw
-				local spr_offx=texX//8
-				local spr_offy=texY//8
-				local address_x=0x8000+tex*64
-				+texX%8+spr_offx*64
-				pix(x,y,peek4(
-				address_x+(texY%8)*8
-				+spr_offy*1024
-				))
 			end
 		end
 	end
@@ -289,7 +296,8 @@ function DrawSky()
 	end
 end
 
-function DrawWalls()
+function DoWallCasts()
+	lowest_wallh=SH
 	for x=t%I_LEAVE,SW-1,I_LEAVE do
 		local length=(cam.length/(SW/2))*(x-SW/2)
 		local dirx,diry=
@@ -298,8 +306,24 @@ function DrawWalls()
 		local hit_id,final_dist,hit_side,wallX=
 		CastRay(plr.x,plr.y,dirx,diry)
 		if hit_id~=0 and hit_id<=127 then
-			zbuf[x]=final_dist
 			local height=WALL_HEIGHT/final_dist
+			zbuf[x]={hit_id,height,wallX,hit_side,dirx,diry,final_dist}
+			if height<lowest_wallh then
+				lowest_wallh=height
+			end
+		end
+	end
+end
+
+function DrawWalls()
+	for x=t%I_LEAVE,SW-1,I_LEAVE do
+		local hit_id=zbuf[x] and zbuf[x][1]
+		if hit_id~=0 and hit_id<=127 then
+			local height=zbuf[x][2]
+			local wallX=zbuf[x][3]
+			local hit_side=zbuf[x][4]
+			local dirx=zbuf[x][5]
+			local diry=zbuf[x][6]
 			local y0=SH/2-height/2
 			local y1=SH/2+height/2
 			--Screen y coords
@@ -313,28 +337,20 @@ function DrawWalls()
 			end
 			--Sprite id offset
 			local spr_offx=texX//8
-			--Sprite address excluding y coords
-			local address_x=0x8000+TILES_TEX[hit_id]*64
-			+texX%8+spr_offx*64
-			--Store last texY and increase by
-			--a step for every line, rather than
-			--re-lerping. This allowed me to
-			--squeeze an extra ~10% performance
-			--on my dev machine.
-			local texYf=
+			--Find where sy0 and sy1 are
+			--in the line between y0 and y1
+			local texYi=
 			TEX_SIZE*(sy0-y0)/(y1-y0)
-			local texY=texYf//1
-			local stepY=
-			TEX_SIZE/(y1-y0)
-			for y=sy0,sy1 do
-				local spr_offy=texY//8
-				pix(x,y,peek4(
-				address_x+(texY%8)*8
-				+spr_offy*1024
-				))
-				texYf=texYf+stepY
-				texY=texYf//1
-			end
+			local texYf=
+			TEX_SIZE*(sy1-y0)/(y1-y0)
+			--Draw texture vertical strip
+			local u=(TILES_TEX[hit_id]*8)%128
+			+texX%8+spr_offx*8
+			local v1=
+			(TILES_TEX[hit_id]//16)*8+texYi
+			local v2=v1+texYf-texYi
+			textri(x,sy0,x+1,sy0,x+1,sy1,
+									u,v1,u,v1,u,v2)
 		end
 	end
 end
